@@ -48,6 +48,13 @@
   .screen.active{display:flex;}
   .screen.fade-in{animation:fadeIn .5s ease both;}
   @keyframes fadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+  #screen-schedule{
+    overflow-y:auto;
+    justify-content:flex-start;
+    padding-top:calc(24px + env(safe-area-inset-top,0px));
+    padding-bottom:calc(28px + env(safe-area-inset-bottom,0px));
+    gap:12px;
+  }
 
   h1.title{
     font-family:Georgia,'Iowan Old Style',serif;
@@ -299,6 +306,8 @@
     <h1 class="title">I promise you, jaan 🤍</h1>
     <p class="sub">I'll make sure I never give you a reason to be upset like this again. Your call, your voice, your feelings — always come first with me.</p>
     <div style="font-size:30px;">💛🤍💛</div>
+    <button class="btn btn-primary" id="final-done-btn" style="margin-top:10px;">Done</button>
+    <p class="sub" id="final-saved-msg" style="display:none; font-size:.85rem;">Saved 💌</p>
   </div>
 
 </div>
@@ -307,6 +316,12 @@
 (function(){
   const $ = (sel,root=document)=>root.querySelector(sel);
   const $$ = (sel,root=document)=>Array.from(root.querySelectorAll(sel));
+
+  // ----- CONFIG -----
+  // Saves her pick to your Google Sheet via Apps Script webhook — silent,
+  // no button, free. Works once this file is hosted on Vercel (or anywhere
+  // outside claude.ai's sandboxed preview).
+  const SAVE_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxGNhEqOI4tpgP2VkdIWjIvYut6wtQZPdkfECK_uTzMfKFgsH04O7jloFwRhDkgyx0i/exec";
 
   function showScreen(id){
     $$('.screen').forEach(s=>{
@@ -358,9 +373,9 @@
     if(!('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(line);
-    // slow, deep, loud, drawn-out delivery; deeper pitch reads more male
-    u.rate = 0.7 + Math.random()*0.08;
-    u.pitch = 0.55 + Math.random()*0.15;
+    // natural pace, urging/pleading tone rather than slow & robotic
+    u.rate = 1.0 + Math.random()*0.1;
+    u.pitch = 0.85 + Math.random()*0.15;
     u.volume = 1;
     if(maleVoice) u.voice = maleVoice;
     window.speechSynthesis.speak(u);
@@ -561,15 +576,36 @@
     }
   }
 
+  let lastPick = null;
+
   $('#done-btn').addEventListener('click', ()=>{
     const day = $('.date-chip.selected');
     const time = $('.time-chip.selected');
     const caller = $('.caller-chip.selected');
     if(!day || !time || !caller) return;
     vibrate(25);
-    buildReceipt(day.dataset.day, time.dataset.time, caller.dataset.caller);
+    lastPick = { day: day.dataset.day, time: time.dataset.time, caller: caller.dataset.caller };
+    buildReceipt(lastPick.day, lastPick.time, lastPick.caller);
+    saveResponse(lastPick);
     showScreen('screen-receipt');
     setTimeout(()=>{ showScreen('screen-final'); playCelebration(); burstHearts(); }, 3200);
+  });
+
+  function saveResponse(pick){
+    if(!SAVE_WEBHOOK_URL) return; // no webhook configured — nothing to send
+    fetch(SAVE_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids CORS preflight with Apps Script
+      body: JSON.stringify(pick)
+    }).catch(()=>{});
+  }
+
+  $('#final-done-btn').addEventListener('click', ()=>{
+    vibrate(20);
+    if(lastPick) saveResponse(lastPick);
+    $('#final-saved-msg').style.display = 'block';
+    $('#final-done-btn').style.opacity = .5;
+    $('#final-done-btn').style.pointerEvents = 'none';
   });
 
   function buildReceipt(day, time, caller){
@@ -587,9 +623,10 @@
   function playClapSound(){
     try{
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const clapTimes = [0, 0.14, 0.28, 0.42, 0.58, 0.78, 1.0, 1.2];
+      // longer, denser burst of claps
+      const clapTimes = [0,0.12,0.24,0.36,0.5,0.64,0.78,0.94,1.1,1.28,1.46,1.66,1.86,2.1];
       clapTimes.forEach(t=>{
-        const bufferSize = Math.floor(ctx.sampleRate * 0.08);
+        const bufferSize = Math.floor(ctx.sampleRate * 0.09);
         const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
         const data = buffer.getChannelData(0);
         for(let i=0;i<bufferSize;i++){
@@ -602,25 +639,46 @@
         filter.frequency.value = 1400 + Math.random()*600;
         filter.Q.value = 0.7;
         const gain = ctx.createGain();
-        gain.gain.value = 0.9;
+        gain.gain.value = 1.0;
         src.connect(filter).connect(gain).connect(ctx.destination);
         src.start(ctx.currentTime + t);
       });
+      // underlying cheer/crowd swell so it reads as a full celebration, not just claps
+      const cheerLen = 2.4;
+      const cheerBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate*cheerLen), ctx.sampleRate);
+      const cd = cheerBuf.getChannelData(0);
+      for(let i=0;i<cd.length;i++){
+        const p = i/cd.length;
+        const envelope = Math.sin(Math.PI*p) ; // swell up then down
+        cd[i] = (Math.random()*2-1) * envelope * 0.5;
+      }
+      const cheerSrc = ctx.createBufferSource();
+      cheerSrc.buffer = cheerBuf;
+      const cheerFilter = ctx.createBiquadFilter();
+      cheerFilter.type = 'bandpass';
+      cheerFilter.frequency.value = 2200;
+      cheerFilter.Q.value = 0.5;
+      const cheerGain = ctx.createGain();
+      cheerGain.gain.value = 0.8;
+      cheerSrc.connect(cheerFilter).connect(cheerGain).connect(ctx.destination);
+      cheerSrc.start(ctx.currentTime);
     }catch(e){}
   }
 
-  function playYaay(){
-    if(!('speechSynthesis' in window)) return;
-    const u = new SpeechSynthesisUtterance('Yaaay!');
-    u.rate = 1.05;
-    u.pitch = 1.6;
-    u.volume = 1;
-    window.speechSynthesis.speak(u);
-  }
+  // Put your own recorded celebration/voice clip here as base64.
+  // Leave empty ("") to just use the built-in clap + cheer sound above.
+  const MAN_VOICE_AUDIO_BASE64 = ""; // <-- PASTE BASE64 STRING HERE (no data: prefix)
+  const MAN_VOICE_AUDIO_MIME = "audio/mp4";
 
   function playCelebration(){
     playClapSound();
-    playYaay();
+    if(MAN_VOICE_AUDIO_BASE64){
+      try{
+        const audio = new Audio(`data:${MAN_VOICE_AUDIO_MIME};base64,${MAN_VOICE_AUDIO_BASE64}`);
+        audio.volume = 1;
+        audio.play().catch(()=>{});
+      }catch(e){}
+    }
   }
 
   function burstHearts(){
